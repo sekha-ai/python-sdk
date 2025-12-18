@@ -53,8 +53,8 @@ docs = [
 [project.urls]
 Homepage = "https://sekha.ai"
 Documentation = "https://docs.sekha.ai"
-Repository = "https://github.com/sekha-ai/sekha-controller"
-Issues = "https://github.com/sekha-ai/sekha-controller/issues"
+Repository = "https://github.com/sekha-ai/python-sdk"
+Issues = "https://github.com/sekha-ai/python-sdk/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sekha"]
