@@ -24,6 +24,28 @@ class ClientConfig:
     rate_limit_requests: int = 1000  # per minute
     rate_limit_window: float = 60.0
 
+class MemoryController(SekhaClient):
+    """Backward‑compatible alias for SekhaClient used in docs.
+
+    Example:
+        from sekha import MemoryController
+
+        memory = MemoryController(
+            ClientConfig(api_key="sk-...", base_url="http://localhost:8080")
+        )
+    """
+    pass
+
+class SekhaClient:
+    @classmethod
+    def from_api_key(
+        cls,
+        api_key: str,
+        base_url: str = "http://localhost:8080",
+        timeout: float = 30.0,
+    ) -> "SekhaClient":
+        return cls(ClientConfig(api_key=api_key, base_url=base_url, timeout=timeout))
+
 
 class SekhaClient:
     """
