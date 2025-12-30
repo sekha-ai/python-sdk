@@ -2,7 +2,7 @@
 Pydantic models for type-safe API interaction
 """
 
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Literal, Union
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
@@ -40,9 +40,9 @@ class MessageDto(BaseModel):
 class NewConversation(BaseModel):
     """Create a new conversation"""
 
-    label: str = Field(..., min_length=1, max_length=200)
-    folder: Optional[str] = Field(default="/", max_length=200)
-    messages: List[MessageDto] = Field(..., min_length=1)
+    messages: List[MessageDto] = []
+    label: Optional[str] = None
+    folder: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(use_enum_values=True)

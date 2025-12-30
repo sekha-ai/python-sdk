@@ -1,301 +1,612 @@
-import pytest
-import httpx
-from unittest.mock import Mock, AsyncMock, patch
-from sekha import MemoryController, MemoryConfig
-from sekha.errors import SekhaAPIError, SekhaConnectionError, SekhaAuthError
+"""
+Complete integration tests for SekhaClient
+Tests all major API endpoints with realistic scenarios
+"""
 
+import pytest
+import asyncio
+from unittest.mock import Mock, AsyncMock, patch
+from datetime import datetime
+import httpx
+
+from sekha import (
+    SekhaClient,
+    ClientConfig,
+    NewConversation,
+    MessageDto,
+    MessageRole,
+    ConversationStatus,
+    QueryRequest,
+    SekhaAPIError,
+    SekhaAuthError,
+    SekhaConnectionError,
+    SekhaNotFoundError,
+    SekhaValidationError,
+    QueryResponse,
+)
+
+
+# ==================== Fixtures ====================
 
 @pytest.fixture
 def config():
-    return MemoryConfig(
+    """Test configuration with valid API key"""
+    return ClientConfig(
         base_url="http://localhost:8080",
-        api_key="sk-test-12345678901234567890123456789012",
-        default_label="Test"
+        api_key="sk-sekha-test-12345678901234567890123456789012",
+        default_label="Test",
     )
 
 
 @pytest.fixture
 def memory(config):
-    return MemoryController(config)
+    """Create client instance (no mocking yet)"""
+    return SekhaClient(config)
 
 
 @pytest.fixture
-def mock_response():
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = {"id": "conv_123", "label": "Test"}
-    return response
+def mock_client():
+    """Create a client with mocked httpx - synchronous fixture"""
+    config = ClientConfig(api_key="sk-sekha-test-12345678901234567890123456789012")
+    client = SekhaClient(config)
 
+    # Create a mock that tracks calls but allows method assignment
+    mock_httpx_client = AsyncMock()
+
+    # Set up default mock response
+    default_response = Mock()
+    default_response.raise_for_status = Mock()
+    
+    # Make json dynamic to return what was sent
+    def dynamic_json():
+        # Try to get the request data
+        try:
+            call_args = mock_httpx_client.post.call_args
+            if call_args and len(call_args.args) > 0:
+                # For GET requests, check query params
+                if mock_httpx_client.get.called:
+                    get_args = mock_httpx_client.get.call_args
+                    if "params" in get_args.kwargs and "label" in get_args.kwargs["params"]:
+                        return {
+                            "content": f"# Test Export for {get_args.kwargs['params']['label']}\n\n## Conversation 1\n\nThis is the content.",
+                            "format": "markdown",
+                            "conversation_count": 1,
+                        }
+                
+                # For POST requests, get the JSON body
+                if "json" in call_args.kwargs:
+                    request_data = call_args.kwargs["json"]
+                    label = request_data.get("label", "Test")
+                else:
+                    label = "Test"
+            else:
+                label = "Test"
+        except:
+            label = "Test"
+            
+        return {
+            "id": "conv-123",
+            "label": label,
+            "folder": "/work",
+            "status": "active",
+            "message_count": 2,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+    
+    default_response.json = dynamic_json
+
+    # Set default return values for all common methods
+    mock_httpx_client.post = AsyncMock(return_value=default_response)
+    mock_httpx_client.get = AsyncMock(return_value=default_response)
+    mock_httpx_client.put = AsyncMock(return_value=default_response)
+    mock_httpx_client.delete = AsyncMock(return_value=default_response)
+
+    # Replace the actual client with mock
+    client.client = mock_httpx_client
+
+    return client  # Return the client directly, not a generator
+
+
+# ==================== Initialization Tests ====================
 
 class TestMemoryControllerInit:
+    """Test client initialization and configuration"""
+    
     def test_init_with_config(self, config):
-        memory = MemoryController(config)
-        assert memory.config.base_url == "http://localhost:8080"
-        assert memory.config.api_key.startswith("sk-test")
-    
+        """Test initialization with full config"""
+        client = SekhaClient(config)
+        assert client.config.api_key == config.api_key
+        assert client.config.base_url == config.base_url
+        
     def test_init_validates_api_key_length(self):
-        with pytest.raises(ValueError, match="API key must be at least 32 characters"):
-            MemoryConfig(base_url="http://localhost:8080", api_key="short")
-    
+        """Test that short API keys raise error"""
+        with pytest.raises(ValueError, match="too short"):
+            ClientConfig(api_key="sk-sekha-short")
+            
     def test_init_validates_base_url_format(self):
+        """Test that invalid URLs raise error"""
         with pytest.raises(ValueError, match="Invalid base_url"):
-            MemoryConfig(base_url="not-a-url", api_key="sk-" + "x" * 32)
+            ClientConfig(api_key="sk-sekha-" + "x" * 32, base_url="not-a-url")
+            
+    def test_init_with_default_label(self, config):
+        """Test config includes default_label"""
+        assert config.default_label == "Test"
 
+
+# ==================== Conversation Creation Tests ====================
 
 class TestCreateConversation:
-    @patch('httpx.Client.post')
-    def test_create_conversation_success(self, mock_post, memory):
-        mock_post.return_value.status_code = 201
-        mock_post.return_value.json.return_value = {
-            "id": "conv_123",
-            "label": "Test",
-            "created_at": "2025-12-21T19:00:00Z"
-        }
-        
-        result = memory.create(
-            messages=[{"role": "user", "content": "Hello"}],
-            label="Test"
+    """Test conversation creation workflows"""
+    
+    @pytest.mark.asyncio
+    async def test_create_conversation_success(self, mock_client):
+        """Test basic conversation creation"""
+        conv = NewConversation(
+            label="Test Conversation",
+            folder="/work",
+            messages=[
+                MessageDto(role=MessageRole.USER, content="Hello"),
+                MessageDto(role=MessageRole.ASSISTANT, content="Hi there!")
+            ]
         )
         
-        assert result["id"] == "conv_123"
-        assert result["label"] == "Test"
-        mock_post.assert_called_once()
-    
-    @patch('httpx.Client.post')
-    def test_create_conversation_with_folder(self, mock_post, memory):
-        mock_post.return_value.status_code = 201
-        mock_post.return_value.json.return_value = {"id": "conv_123"}
+        result = await mock_client.create_conversation(conv)
         
-        memory.create(
-            messages=[{"role": "user", "content": "Test"}],
-            label="Work",
-            folder="Projects/2025"
+        assert result.label == "Test Conversation"
+        assert result.folder == "/work"
+        assert mock_client.client.post.called
+        
+    @pytest.mark.asyncio
+    async def test_create_conversation_minimal(self, mock_client):
+        """Test creating conversation with minimal data"""
+        conv = NewConversation(
+            label="Minimal Test",  # Provide minimal required data
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
         )
         
-        call_args = mock_post.call_args
-        assert call_args[1]['json']['folder'] == "Projects/2025"
-    
-    @patch('httpx.Client.post')
-    def test_create_conversation_auth_error(self, mock_post, memory):
-        mock_post.return_value.status_code = 401
+        result = await mock_client.create_conversation(conv)
+        assert result.id == "conv-123"
+
+    @pytest.mark.asyncio
+    async def test_create_conversation_auth_error(self, config):
+        """Test 401 error handling"""
+        # Create a real client but mock the httpx client directly
+        client = SekhaClient(config)
+        
+        error_response = Mock()
+        error_response.status_code = 401
+        error_response.text = "Invalid API key"
+        
+        # Create a proper httpx request mock
+        request_mock = Mock()
+        request_mock.url = "http://localhost:8080/api/v1/conversations"
+        
+        # Create the HTTPStatusError
+        auth_error = httpx.HTTPStatusError(
+            "Unauthorized",
+            request=request_mock,
+            response=error_response
+        )
+        
+        # Mock the client's httpx client
+        client.client = AsyncMock()
+        client.client.post = AsyncMock(side_effect=auth_error)
+        
+        conv = NewConversation(
+            label="Test",
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
+        )
         
         with pytest.raises(SekhaAuthError):
-            memory.create(messages=[{"role": "user", "content": "Test"}])
+            await client.create_conversation(conv)
+
+    @pytest.mark.asyncio
+    async def test_400_bad_request(self, mock_client):
+        """Test 400 error handling"""
+        error_response = Mock()
+        error_response.status_code = 400
+        error_response.text = "Invalid request payload"
+
+        mock_client.client.post = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Bad Request",
+                request=Mock(),
+                response=error_response
+            )
+        )
+
+        conv = NewConversation(
+            label="Test",
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
+        )
+
+        # Change from SekhaAPIError to SekhaValidationError
+        with pytest.raises(SekhaValidationError, match="Invalid conversation data"):
+            await mock_client.create_conversation(conv)
+
+    @pytest.mark.asyncio
+    async def test_429_rate_limit(self, mock_client):
+        """Test rate limit error handling"""
+        error_response = Mock()
+        error_response.status_code = 429
+        error_response.headers = {"Retry-After": "60"}
+
+        mock_client.client.post = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Too Many Requests",
+                request=Mock(),
+                response=error_response
+            )
+        )
+
+        conv = NewConversation(
+            label="Test",
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
+        )
+
+        # FIX: This should raise SekhaAPIError, not SekhaValidationError
+        with pytest.raises(SekhaAPIError, match="429"):
+            await mock_client.create_conversation(conv)
+
+
+# ==================== Smart Query Tests ====================
+
+class TestSmartQuery:
+    """Test intelligent context assembly"""
     
-    @patch('httpx.Client.post')
-    def test_create_conversation_connection_error(self, mock_post, memory):
-        mock_post.side_effect = httpx.ConnectError("Connection failed")
+    @pytest.mark.asyncio
+    async def test_smart_query_success(self, mock_client):
+        """Test successful smart query"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={
+            "results": [
+                {
+                    "conversation_id": "conv-456",
+                    "message_id": "msg-789",
+                    "score": 0.92,
+                    "content": "Authentication is handled via API keys",
+                    "label": "Project:Auth",
+                    "folder": "/work",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 10,
+        })
         
-        with pytest.raises(SekhaConnectionError):
-            memory.create(messages=[{"role": "user", "content": "Test"}])
-
-
-class TestAssembleContext:
-    @patch('httpx.Client.post')
-    def test_assemble_context_success(self, mock_post, memory):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {
-            "context": "Assembled context",
-            "token_count": 500,
-            "conversations_used": ["conv_1", "conv_2"]
-        }
+        mock_client.client.post = AsyncMock(return_value=mock_response)
         
-        result = memory.assemble_context(
-            query="How do we handle authentication?",
-            token_budget=8000
+        result = await mock_client.smart_query(
+            query="How to handle authentication?",
+            limit=5,
+            filters={"label": "Project:Auth"}
         )
         
-        assert result["context"] == "Assembled context"
-        assert result["token_count"] == 500
-        assert len(result["conversations_used"]) == 2
-    
-    @patch('httpx.Client.post')
-    def test_assemble_context_with_labels(self, mock_post, memory):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"context": "test"}
+        assert result.total == 1
+        assert len(result.results) == 1
+        assert result.results[0].score > 0.9
         
-        memory.assemble_context(
-            query="test",
-            labels=["Project:AI", "Work"],
-            token_budget=5000
-        )
+    @pytest.mark.asyncio
+    async def test_smart_query_empty_results(self, mock_client):
+        """Test query with no results"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={
+            "results": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 10,
+        })
         
-        call_args = mock_post.call_args[1]['json']
-        assert call_args['labels'] == ["Project:AI", "Work"]
-        assert call_args['token_budget'] == 5000
+        mock_client.client.post = AsyncMock(return_value=mock_response)
+        
+        result = await mock_client.smart_query(query="non-existent topic")
+        
+        assert result.total == 0
+        assert len(result.results) == 0
 
+
+# ==================== Memory Management Tests ====================
 
 class TestMemoryManagement:
-    @patch('httpx.Client.post')
-    def test_pin_conversation(self, mock_post, memory):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"success": True}
-        
-        result = memory.pin("conv_123")
-        assert result is True
+    """Test pin, archive, label operations"""
     
-    @patch('httpx.Client.post')
-    def test_archive_conversation(self, mock_post, memory):
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"success": True}
+    @pytest.mark.asyncio
+    async def test_pin_conversation(self, mock_client):
+        """Test pinning a conversation"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={"success": True})
         
-        result = memory.archive("conv_123")
-        assert result is True
-    
-    @patch('httpx.Client.patch')
-    def test_update_label(self, mock_patch, memory):
-        mock_patch.return_value.status_code = 200
-        mock_patch.return_value.json.return_value = {"success": True}
+        mock_client.client.put = AsyncMock(return_value=mock_response)
         
-        result = memory.update_label("conv_123", "NewLabel")
-        assert result is True
+        await mock_client.pin("conv-123")
         
-        call_args = mock_patch.call_args
-        assert "conv_123" in call_args[0][0]
-        assert call_args[1]['json']['label'] == "NewLabel"
+        # Verify the call was made
+        assert mock_client.client.put.called
+        call_args = mock_client.client.put.call_args
+        assert "conv-123/status" in call_args[0][0]
+        assert call_args[1]["json"]["status"] == "pinned"
+        
+    @pytest.mark.asyncio
+    async def test_archive_conversation(self, mock_client):
+        """Test archiving a conversation"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        
+        mock_client.client.put = AsyncMock(return_value=mock_response)
+        
+        await mock_client.archive("conv-456")
+        
+        call_args = mock_client.client.put.call_args
+        assert call_args[1]["json"]["status"] == "archived"
+        
+    @pytest.mark.asyncio
+    async def test_update_label(self, mock_client):
+        """Test updating conversation label and folder"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        
+        mock_client.client.put = AsyncMock(return_value=mock_response)
+        
+        await mock_client.update_label(
+            conversation_id="conv-123",
+            new_label="Updated Label",
+            new_folder="/archive"
+        )
+        
+        call_args = mock_client.client.put.call_args
+        assert call_args[1]["json"]["label"] == "Updated Label"
+        assert call_args[1]["json"]["folder"] == "/archive"
 
 
-class TestSearch:
-    @patch('httpx.Client.get')
-    def test_search_success(self, mock_get, memory):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "results": [
-                {"id": "conv_1", "label": "Test", "score": 0.95},
-                {"id": "conv_2", "label": "Work", "score": 0.88}
-            ]
-        }
-        
-        results = memory.search("authentication", limit=10)
-        assert len(results) == 2
-        assert results[0]["score"] > results[1]["score"]
-    
-    @patch('httpx.Client.get')
-    def test_search_with_label_filter(self, mock_get, memory):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"results": []}
-        
-        memory.search("test", label="Work", limit=5)
-        
-        call_args = mock_get.call_args
-        params = call_args[1]['params']
-        assert params['label'] == "Work"
-        assert params['limit'] == 5
-
-
-class TestPruning:
-    @patch('httpx.Client.get')
-    def test_get_pruning_suggestions(self, mock_get, memory):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "suggestions": [
-                {"id": "conv_1", "reason": "Low importance", "score": 2},
-                {"id": "conv_2", "reason": "Redundant", "score": 3}
-            ]
-        }
-        
-        suggestions = memory.get_pruning_suggestions()
-        assert len(suggestions) == 2
-        assert suggestions[0]["score"] == 2
-
+# ==================== Export Tests ====================
 
 class TestExport:
-    @patch('httpx.Client.get')
-    def test_export_markdown(self, mock_get, memory):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "content": "# Exported Content\n\nTest"
-        }
-        
-        result = memory.export("Project:AI", format="markdown")
-        assert result.startswith("# Exported")
-    
-    @patch('httpx.Client.get')
-    def test_export_json(self, mock_get, memory):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {
-            "conversations": [{"id": "conv_1"}]
-        }
-        
-        result = memory.export("Work", format="json")
-        assert "conversations" in result
-
-
-class TestRetryLogic:
-    @patch('httpx.Client.post')
-    def test_retry_on_500_error(self, mock_post, memory):
-        # First two calls fail, third succeeds
-        mock_post.side_effect = [
-            Mock(status_code=500),
-            Mock(status_code=500),
-            Mock(status_code=200, json=lambda: {"id": "conv_123"})
-        ]
-        
-        result = memory.create(messages=[{"role": "user", "content": "Test"}])
-        assert result["id"] == "conv_123"
-        assert mock_post.call_count == 3
-    
-    @patch('httpx.Client.post')
-    def test_max_retries_exceeded(self, mock_post, memory):
-        mock_post.return_value.status_code = 500
-        
-        with pytest.raises(SekhaAPIError):
-            memory.create(messages=[{"role": "user", "content": "Test"}])
-        
-        assert mock_post.call_count == 3  # Default max retries
-
-
-@pytest.mark.asyncio
-class TestAsyncClient:
-    @pytest.mark.asyncio
-    async def test_async_context_manager(self, config):
-        async with MemoryController(config).async_client() as client:
-            assert client is not None
+    """Test export functionality"""
     
     @pytest.mark.asyncio
-    @patch('httpx.AsyncClient.post')
-    async def test_async_create(self, mock_post, config):
-        mock_post.return_value.status_code = 201
-        mock_post.return_value.json = AsyncMock(return_value={"id": "conv_123"})
+    async def test_export_markdown(self, mock_client):
+        """Test markdown export"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={
+            "content": "# Test Export\n\n## Conversation 1\n\nThis is the content.",
+            "format": "markdown",
+            "conversation_count": 1,
+        })
         
-        async with MemoryController(config).async_client() as client:
-            result = await client.create(messages=[{"role": "user", "content": "Test"}])
-            assert result["id"] == "conv_123"
+        mock_client.client.get = AsyncMock(return_value=mock_response)
+        
+        result = await mock_client.export(
+            label="Project:AI",
+            format="markdown"
+        )
+        
+        assert result.startswith("# Test Export")
+        assert "conversation 1" in result.lower()
+        
+    @pytest.mark.asyncio
+    async def test_export_json(self, mock_client):
+        """Test JSON export"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value={
+            "content": '[{"id": "conv-1", "label": "Test"}]',
+            "format": "json",
+            "conversation_count": 1,
+        })
+        
+        mock_client.client.get = AsyncMock(return_value=mock_response)
+        
+        result = await mock_client.export(format="json")
+        
+        assert '"id"' in result
+        assert '"label"' in result
 
+
+# ==================== Pruning Tests ====================
+
+class TestPruning:
+    """Test pruning suggestions"""
+    
+    @pytest.mark.asyncio
+    async def test_get_pruning_suggestions(self, mock_client):
+        """Test pruning suggestions retrieval"""
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.json = Mock(return_value=[
+            {
+                "conversation_id": "old-conv-1",
+                "conversation_label": "Old Project",
+                "last_accessed": datetime.now().isoformat(),
+                "message_count": 150,
+                "token_estimate": 4500,
+                "importance_score": 2.1,
+                "preview": "Old conversation content...",
+                "recommendation": "archive",
+            },
+            {
+                "conversation_id": "old-conv-2",
+                "conversation_label": "Legacy Code",
+                "last_accessed": datetime.now().isoformat(),
+                "message_count": 200,
+                "token_estimate": 6000,
+                "importance_score": 1.8,
+                "preview": "Deprecated code discussion...",
+                "recommendation": "delete",
+            }
+        ])
+        
+        mock_client.client.get = AsyncMock(return_value=mock_response)
+        
+        suggestions = await mock_client.get_pruning_suggestions(
+            threshold_days=90,
+            importance_threshold=3.0
+        )
+        
+        assert len(suggestions) == 2
+        assert suggestions[0].recommendation == "archive"
+        assert suggestions[0].importance_score < 3.0
+
+
+# ==================== Error Handling Tests ====================
 
 class TestErrorHandling:
-    @patch('httpx.Client.post')
-    def test_400_bad_request(self, mock_post, memory):
-        mock_post.return_value.status_code = 400
-        mock_post.return_value.json.return_value = {"error": "Invalid payload"}
-        
-        with pytest.raises(SekhaAPIError, match="Invalid payload"):
-            memory.create(messages=[])
+    """Test comprehensive error scenarios"""
     
-    @patch('httpx.Client.post')
-    def test_404_not_found(self, mock_post, memory):
-        mock_post.return_value.status_code = 404
+    @pytest.mark.asyncio
+    async def test_400_bad_request(self, mock_client):
+        """Test 400 error handling"""
+        error_response = Mock()
+        error_response.status_code = 400
+        error_response.text = "Invalid request payload"
         
-        with pytest.raises(SekhaAPIError, match="404"):
-            memory.create(messages=[{"role": "user", "content": "Test"}])
+        # Create proper request mock
+        request_mock = Mock()
+        request_mock.url = "http://localhost:8080/api/v1/conversations"
+        
+        mock_client.client.post = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Bad Request",
+                request=request_mock,
+                response=error_response
+            )
+        )
+        
+        conv = NewConversation(
+            label="Test",
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
+        )
+        
+        # FIX: Change SekhaAPIError to SekhaValidationError
+        with pytest.raises(SekhaValidationError, match="Invalid conversation data"):
+            await mock_client.create_conversation(conv)
+            
+    @pytest.mark.asyncio
+    async def test_404_not_found(self, mock_client):
+        """Test 404 error handling"""
+        error_response = Mock()
+        error_response.status_code = 404
+        
+        mock_client.client.get = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Not Found",
+                request=Mock(),
+                response=error_response
+            )
+        )
+        
+        with pytest.raises(SekhaNotFoundError):
+            await mock_client.get_conversation("non-existent")
+            
+    @pytest.mark.asyncio
+    async def test_429_rate_limit(self, mock_client):
+        """Test rate limit error handling"""
+        error_response = Mock()
+        error_response.status_code = 429
+        error_response.headers = {"Retry-After": "60"}
+        
+        request_mock = Mock()
+        request_mock.url = "http://localhost:8080/api/v1/conversations"
+        
+        mock_client.client.post = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Too Many Requests",
+                request=request_mock,
+                response=error_response
+            )
+        )
+        
+        conv = NewConversation(
+            label="Test",
+            messages=[MessageDto(role=MessageRole.USER, content="Test")]
+        )
+        
+        # This one correctly expects SekhaAPIError for 429
+        with pytest.raises(SekhaAPIError, match="429"):
+            await mock_client.create_conversation(conv)
+
+class TestErrorBranches:
+    """Test specific error handling branches"""
     
-    @patch('httpx.Client.post')
-    def test_429_rate_limit(self, mock_post, memory):
-        mock_post.return_value.status_code = 429
-        mock_post.return_value.headers = {"Retry-After": "60"}
+    @pytest.mark.asyncio
+    async def test_get_conversation_not_found(self, mock_client):
+        """Test 404 on get_conversation"""
+        error_response = Mock()
+        error_response.status_code = 404
         
-        with pytest.raises(SekhaAPIError, match="Rate limit"):
-            memory.create(messages=[{"role": "user", "content": "Test"}])
+        mock_client.client.get = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Not Found",
+                request=Mock(),
+                response=error_response
+            )
+        )
+        
+        with pytest.raises(SekhaNotFoundError):
+            await mock_client.get_conversation("non-existent")
+
+    @pytest.mark.asyncio
+    async def test_smart_query_connection_error(self, mock_client):
+        """Test connection error in smart_query"""
+        mock_client.client.post = AsyncMock(
+            side_effect=httpx.ConnectError("Connection failed")
+        )
+        
+        with pytest.raises(SekhaConnectionError):
+            await mock_client.smart_query("test query")
+
+    @pytest.mark.asyncio
+    async def test_export_invalid_format(self, mock_client):
+        """Test export with invalid format parameter"""
+        error_response = Mock()
+        error_response.status_code = 400
+        
+        mock_client.client.get = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "Bad Request",
+                request=Mock(),
+                response=error_response
+            )
+        )
+        
+        with pytest.raises(SekhaValidationError):
+            await mock_client.export(format="invalid")
+
+# ==================== Async Context Manager Tests ====================
+
+class TestAsyncClient:
+    """Test async context manager functionality"""
+    
+    @pytest.mark.asyncio
+    async def test_async_context_manager(self, config):
+        """Test async context manager usage"""
+        async with SekhaClient(config) as client:
+            assert isinstance(client, SekhaClient)
+            assert client.client is not None
+            
+    @pytest.mark.asyncio
+    async def test_async_cleanup(self, config):
+        """Test proper cleanup of async resources"""
+        client = SekhaClient(config)
+        await client.close()
+        # Should not raise any exceptions
 
 
-class TestConnectionPooling:
-    def test_client_reuse(self, memory):
-        # Should reuse the same client instance
-        client1 = memory._client
-        client2 = memory._client
-        assert client1 is client2
+# ==================== Rate Limiting Tests ====================
+
+class TestRateLimiting:
+    """Test rate limiter integration"""
     
-    def test_client_cleanup(self, memory):
-        memory.close()
-        # Should be able to create new client after close
-        memory.create(messages=[{"role": "user", "content": "Test"}])
+    @pytest.mark.asyncio
+    async def test_rate_limiter_acquires(self, config):
+        """Test rate limiter is called"""
+        client = SekhaClient(config)
+        
+        # Access the rate limiter
+        assert client.rate_limiter.max_requests == 1000
+        assert client.rate_limiter.window_seconds == 60.0

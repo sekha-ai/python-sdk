@@ -17,15 +17,14 @@ from sekha import (
     QueryRequest,
     ConversationStatus,
     MessageRole,
+    ClientConfig,
 )
 
 
 @pytest.fixture
-async def mock_client():
-    """Create a client with mocked httpx"""
-    from sekha.client import ClientConfig
-
-    config = ClientConfig(api_key="sk-sekha-test-key-for-testing-only")
+def mock_client():
+    """Create a client with mocked httpx - synchronous fixture"""
+    config = ClientConfig(api_key="sk-sekha-test-key-for-testing-only-12345678901234567890")
     client = SekhaClient(config)
 
     # Create a mock that tracks calls but allows method assignment
@@ -51,11 +50,10 @@ async def mock_client():
     mock_httpx_client.put = AsyncMock(return_value=default_response)
     mock_httpx_client.delete = AsyncMock(return_value=default_response)
 
+    # Replace the actual client with mock
     client.client = mock_httpx_client
 
-    yield client
-
-    await client.close()
+    return client  # Return the client directly, not a generator
 
 
 @pytest.mark.asyncio
@@ -66,9 +64,9 @@ async def test_create_conversation(mock_client):
         folder="/",
         messages=[MessageDto(role=MessageRole.USER, content="Hello")],
     )
-
+    
     result = await mock_client.create_conversation(conv)
-
+    
     assert isinstance(result, ConversationResponse)
     assert result.label == "Test"
     assert mock_client.client.post.called

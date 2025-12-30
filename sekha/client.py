@@ -10,8 +10,7 @@ import backoff
 
 from .models import *
 from .errors import *
-from .utils import RateLimiter, ExponentialBackoff, validate_api_key
-
+from .utils import RateLimiter, ExponentialBackoff, validate_api_key, validate_base_url
 
 @dataclass
 class ClientConfig:
@@ -23,28 +22,18 @@ class ClientConfig:
     max_retries: int = 3
     rate_limit_requests: int = 1000  # per minute
     rate_limit_window: float = 60.0
+    default_label: Optional[str] = None
 
-class MemoryController(SekhaClient):
-    """Backward‑compatible alias for SekhaClient used in docs.
-
-    Example:
-        from sekha import MemoryController
-
-        memory = MemoryController(
-            ClientConfig(api_key="sk-...", base_url="http://localhost:8080")
-        )
-    """
-    pass
-
-class SekhaClient:
-    @classmethod
-    def from_api_key(
-        cls,
-        api_key: str,
-        base_url: str = "http://localhost:8080",
-        timeout: float = 30.0,
-    ) -> "SekhaClient":
-        return cls(ClientConfig(api_key=api_key, base_url=base_url, timeout=timeout))
+    def __post_init__(self):
+        """Validate configuration after initialization"""
+        validate_api_key(self.api_key)
+        validate_base_url(self.base_url)
+        
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+            
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
 
 
 class SekhaClient:
@@ -245,6 +234,8 @@ class SekhaClient:
 
     # ============== Smart Query ==============
 
+# Find smart_query method (around line 259-267)
+
     async def smart_query(
         self,
         query: str,
@@ -274,6 +265,21 @@ class SekhaClient:
             response.raise_for_status()
             return QueryResponse(**response.json())
 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                raise SekhaValidationError("Invalid query parameters", e.response.text)
+            elif e.response.status_code == 401:
+                raise SekhaAuthError("Invalid API key")
+            else:
+                raise SekhaAPIError(
+                    f"Smart query failed: {e.response.text}",
+                    e.response.status_code,
+                    e.response.text,
+                )
+        except httpx.TimeoutException:
+            raise SekhaConnectionError("Smart query timed out")
+        except httpx.ConnectError as e:
+            raise SekhaConnectionError(f"Connection failed: {e}")
         except Exception as e:
             raise SekhaError(f"Smart query failed: {e}")
 
@@ -474,7 +480,6 @@ class SekhaClient:
 
 # ============== Sync Wrapper ==============
 
-
 class SyncSekhaClient:
     """
     Synchronous wrapper for SekhaClient
@@ -506,3 +511,8 @@ class SyncSekhaClient:
             return asyncio.run(async_method(*args, **kwargs))
 
         return sync_wrapper
+
+
+# Alias for backward compatibility and to match implementation plan
+MemoryController = SekhaClient
+MemoryConfig = ClientConfig
